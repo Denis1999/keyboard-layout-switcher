@@ -1,0 +1,442 @@
+#!/usr/bin/python3 -I
+"""layout-fix: исправление текста, набранного не в той раскладке (en <-> ru).
+
+Системная служба (root). Читает клавиатуры напрямую через /dev/input,
+нажатия выдаёт через собственную виртуальную клавиатуру (uinput).
+С сессией KDE (раскладка, буфер обмена) работает от имени LAYOUT_FIX_USER.
+
+  Pause (Caps Lock)        — последнее слово: стереть, сменить раскладку,
+                             набрать те же клавиши заново. Повтор — вернуть.
+  Shift+Pause (Shift+Caps) — выделенный текст: перевести и вставить.
+                             В терминалах (выделение там не редактируется) —
+                             вся строка с последнего Enter, тем же способом, что слово.
+
+Pause/Shift+Pause забирает у программ скрипт KWin (focus.js); он же сообщает
+класс активного окна.
+
+В памяти хранятся только последнее слово и текущая строка (не больше
+MAX_LINE нажатий); сбрасываются по Enter, Tab, стрелкам, Ctrl/Alt/Super-
+сочетаниям, кликам мыши и смене активного окна. Никуда не пишутся.
+"""
+import fcntl
+import glob
+import os
+import pwd
+import re
+import selectors
+import struct
+import subprocess
+import time
+
+# --- evdev / uinput ---------------------------------------------------------
+EVENT = struct.Struct("llHHi")
+EV_SYN, EV_KEY = 0, 1
+UI_SET_EVBIT, UI_SET_KEYBIT = 0x40045564, 0x40045565
+UI_DEV_SETUP, UI_DEV_CREATE = 0x405C5503, 0x5501
+BUS_VIRTUAL = 0x06
+VDEV_NAME = "layout-fix virtual keyboard"
+
+PAUSE, BACKSPACE, SPACE, CTRL, LSHIFT, KEY_V = 119, 14, 57, 29, 42, 47
+SHIFTS = {42, 54}
+OTHER_MODS = {29, 97, 56, 100, 125, 126}  # Ctrl, Alt, Super
+CHAR_KEYS = set(range(2, 14)) | set(range(16, 28)) | set(range(30, 42)) | {43} \
+    | set(range(44, 54)) | set(range(71, 84)) | {55, 98}
+MOUSE_BUTTONS = set(range(0x110, 0x118))
+MAX_LINE = 100  # больше нажатий в слове/строке не храним
+
+# --- активное окно (через скрипт KWin) ---------------------------------------
+FOCUS_JS = "/usr/local/share/layout-fix/focus.js"
+# В терминалах выделение — текст на экране, заменить его нельзя
+TERMINAL_RE = re.compile(r"konsole|yakuake|terminal|kitty|alacritty|foot|wezterm|"
+                         r"xterm|tilix|terminator|ghostty|rio|warp", re.I)
+# Окна для паролей: здесь нажатия не запоминаются и не исправляются
+SENSITIVE_CLASS_RE = re.compile(r"polkit|pinentry|askpass|kwallet|ksecret|keepass|"
+                                r"bitwarden|1password|proton.?pass|seahorse|gcr|"
+                                r"kdesu|sddm|kscreenlocker", re.I)
+SENSITIVE_TITLE_RE = re.compile(r"парол|password|passwort|passphrase|пин-?код|\bpin\b|"
+                                r"аутентифик|авториз|\bвход\b|\bлогин\b|"
+                                r"sign.?in|log.?in|authenticat|unlock|разблокир", re.I)
+# Работает от имени пользователя. Печатает для службы строки:
+#   F<TAB>id<TAB>класс<TAB>заголовок — активное окно (от скрипта KWin)
+#   L<TAB>1|0                         — экран заблокирован / разблокирован
+FOCUS_HELPER = r'''
+import sys, dbus, dbus.service, dbus.mainloop.glib
+from gi.repository import GLib
+dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+bus = dbus.SessionBus()
+name = dbus.service.BusName("net.local.LayoutFix", bus, do_not_queue=True)
+def out(*parts):
+    print("\t".join(str(p).replace("\n", " ").replace("\t", " ") for p in parts), flush=True)
+class Svc(dbus.service.Object):
+    @dbus.service.method("net.local.LayoutFix", in_signature="sss")
+    def Focus(self, wid, cls, caption):
+        out("F", wid, cls, caption)
+Svc(bus, "/")
+bus.add_signal_receiver(lambda active: out("L", int(bool(active))),
+                        "ActiveChanged", "org.freedesktop.ScreenSaver")
+try:
+    ss = bus.get_object("org.freedesktop.ScreenSaver", "/ScreenSaver")
+    out("L", int(bool(ss.GetActive(dbus_interface="org.freedesktop.ScreenSaver"))))
+except dbus.DBusException:
+    out("L", 0)
+sc = dbus.Interface(bus.get_object("org.kde.KWin", "/Scripting"), "org.kde.kwin.Scripting")
+sc.unloadScript("layout-fix")
+sc.loadScript(sys.argv[1], "layout-fix", signature="ss")
+sc.start()
+GLib.MainLoop().run()
+'''
+
+# --- перевод раскладки ------------------------------------------------------
+EN = "`qwertyuiop[]asdfghjkl;'zxcvbnm,./~QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?@#$^&|"
+RU = "ёйцукенгшщзхъфывапролджэячсмитьбю.ЁЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,\"№;:?/"
+TO_RU, TO_EN = str.maketrans(EN, RU), str.maketrans(RU, EN)
+
+
+def convert_word(word):
+    """Одно слово: направление по его собственным буквам."""
+    cyr = len(re.findall(r"[а-яёА-ЯЁ]", word))
+    lat = len(re.findall(r"[a-zA-Z]", word))
+    if cyr > lat:
+        return word.translate(TO_EN), "us"
+    if lat > cyr:
+        return word.translate(TO_RU), "ru"
+    return word, None  # нет букв (числа, знаки) — не трогаем
+
+
+def convert(text):
+    """Каждое слово переводится отдельно, так что смешанный текст тоже
+    исправляется целиком. Раскладка — по последнему слову с буквами."""
+    parts, target = [], None
+    for part in re.split(r"(\s+)", text):
+        conv, t = convert_word(part)
+        parts.append(conv)
+        target = t or target
+    return "".join(parts), target or "ru"
+
+
+# --- действия в сессии пользователя -----------------------------------------
+class Session:
+    def __init__(self, user):
+        pw = pwd.getpwnam(user)
+        self.uid, self.gid, self.home = pw.pw_uid, pw.pw_gid, pw.pw_dir
+        self.runtime = f"/run/user/{self.uid}"
+
+    def env(self):
+        env = {"HOME": self.home, "XDG_RUNTIME_DIR": self.runtime,
+               "DBUS_SESSION_BUS_ADDRESS": f"unix:path={self.runtime}/bus",
+               "PATH": "/usr/bin:/bin"}
+        socks = sorted(p for p in glob.glob(f"{self.runtime}/wayland-*")
+                       if not p.endswith(".lock"))
+        if socks:
+            env["WAYLAND_DISPLAY"] = os.path.basename(socks[0])
+        return env
+
+    def run(self, *cmd, inp=None, wait_output=True):
+        kw = dict(user=self.uid, group=self.gid, extra_groups=[], env=self.env(),
+                  input=inp, text=True, timeout=3)
+        if wait_output:
+            return subprocess.run(cmd, capture_output=True, **kw)
+        # wl-copy остаётся в фоне, его вывод не ждём
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, **kw)
+
+    def qdbus(self, *args):
+        return self.run("qdbus6", "--literal", "org.kde.keyboard", "/Layouts",
+                        *args).stdout
+
+    def layouts(self):
+        return re.findall(r'\(sss\) "([^"]*)"',
+                          self.qdbus("org.kde.KeyboardLayouts.getLayoutsList"))
+
+    def set_layout(self, index):
+        self.qdbus("org.kde.KeyboardLayouts.setLayout", str(index))
+
+    def next_layout(self):
+        count = len(self.layouts()) or 1
+        cur = int(re.sub(r"\D", "", self.qdbus("org.kde.KeyboardLayouts.getLayout")) or 0)
+        self.set_layout((cur + 1) % count)
+
+    def clip_get(self, primary=False):
+        r = self.run("wl-paste", "-n", "-t", "text", *(["-p"] if primary else []))
+        return r.stdout if r.returncode == 0 else None
+
+    def clip_set(self, text):
+        self.run("wl-copy", inp=text, wait_output=False)
+
+    def spawn(self, *cmd):
+        """Фоновый процесс от имени пользователя (или None, если сеанса нет)."""
+        env = self.env()
+        if "WAYLAND_DISPLAY" not in env:
+            return None
+        return subprocess.Popen(cmd, user=self.uid, group=self.gid, extra_groups=[],
+                                env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+
+class Helper:
+    """Перезапускаемый процесс сеанса; каждая строка его вывода — событие."""
+
+    def __init__(self, sel, start, on_line, skip_first_sec=0.0, on_exit=None):
+        self.sel, self.start, self.on_line = sel, start, on_line
+        self.skip, self.on_exit = skip_first_sec, on_exit
+        self.proc, self.started, self.buf = None, -10.0, b""
+
+    def tick(self):
+        if self.proc is not None and self.proc.poll() is not None:  # сеанс завершился
+            self.sel.unregister(self.proc.stdout)
+            self.proc.stdout.close()
+            self.proc = None
+            if self.on_exit:
+                self.on_exit()
+        if self.proc is None and time.monotonic() - self.started > 3:
+            self.started = time.monotonic()
+            try:
+                self.proc = self.start()
+            except OSError:
+                self.proc = None
+            if self.proc is not None:
+                self.buf = b""
+                os.set_blocking(self.proc.stdout.fileno(), False)
+                self.sel.register(self.proc.stdout, selectors.EVENT_READ, self)
+
+    def readable(self):
+        try:
+            self.buf += os.read(self.proc.stdout.fileno(), 4096)
+        except BlockingIOError:
+            return
+        *lines, self.buf = self.buf.split(b"\n")
+        if time.monotonic() - self.started < self.skip:
+            return
+        for line in lines:
+            self.on_line(line.decode(errors="replace"))
+
+
+# --- виртуальная клавиатура -------------------------------------------------
+class VirtualKeyboard:
+    def __init__(self):
+        self.fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+        fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_KEY)
+        for k in range(1, 249):
+            fcntl.ioctl(self.fd, UI_SET_KEYBIT, k)
+        setup = struct.pack("HHHH80sI", BUS_VIRTUAL, 0x1FF1, 0x0001, 1,
+                            VDEV_NAME.encode(), 0)
+        fcntl.ioctl(self.fd, UI_DEV_SETUP, setup)
+        fcntl.ioctl(self.fd, UI_DEV_CREATE)
+        time.sleep(0.5)  # дать KWin подхватить устройство
+
+    def key(self, code, value):
+        os.write(self.fd, EVENT.pack(0, 0, EV_KEY, code, value)
+                 + EVENT.pack(0, 0, EV_SYN, 0, 0))
+        time.sleep(0.004)
+
+    def tap(self, code, shift=False):
+        if shift:
+            self.key(LSHIFT, 1)
+        self.key(code, 1)
+        self.key(code, 0)
+        if shift:
+            self.key(LSHIFT, 0)
+
+
+# --- логика ----------------------------------------------------------------
+class Fixer:
+    def __init__(self, session, vkbd):
+        self.s, self.v = session, vkbd
+        self.word = []      # [(keycode, shift)] последнего слова + пробелы после него
+        self.line = []      # то же для всей строки с последнего Enter (для терминалов)
+        self.held = set()
+        self.pending = None  # "word" | "selection"
+        # Выделение на Wayland не очищается при снятии, поэтому считаем его
+        # действительным, только если оно сменилось после последнего
+        # набора текста или клика мышью.
+        self.sel_valid = False
+        self.focus = ""      # класс активного окна
+        self.window = None   # id активного окна
+        self.sensitive = False
+        self.locked = False
+        self.session_known = False  # пока сеанс неизвестен (экран входа) — не работаем
+
+    @property
+    def blocked(self):
+        return self.sensitive or self.locked or not self.session_known
+
+    def on_selection_changed(self, _line=""):
+        self.sel_valid = True
+
+    def on_session_line(self, line):
+        kind, _, rest = line.partition("\t")
+        if kind == "F":
+            wid, cls, caption = (rest.split("\t") + ["", ""])[:3]
+            if wid != self.window:
+                self.reset()  # в другом окне набранное раньше не исправляем
+            self.window, self.focus = wid, cls
+            self.sensitive = bool(SENSITIVE_CLASS_RE.search(cls)
+                                  or SENSITIVE_TITLE_RE.search(caption))
+            self.session_known = True
+        elif kind == "L":
+            self.locked = rest.strip() == "1"
+            self.reset()
+        if self.blocked:
+            self.reset()
+
+    def on_session_lost(self):
+        self.session_known = False
+        self.reset()
+
+    def reset(self):
+        self.word, self.line = [], []
+
+    def on_key(self, code, value):
+        if value == 0:
+            self.held.discard(code)
+            if code == PAUSE or (code in SHIFTS and self.pending == "selection"):
+                self.maybe_run()
+            return
+        if value == 1:
+            self.held.add(code)
+        shift = bool(self.held & SHIFTS)
+
+        if code in SHIFTS or code in OTHER_MODS:
+            return
+        if self.blocked:  # окно пароля, блокировка, нет сеанса — ничего не запоминаем
+            self.reset()
+            self.pending = None
+            return
+        if value == 1 and code != PAUSE and \
+                (code in MOUSE_BUTTONS or not (self.held & OTHER_MODS)):
+            self.sel_valid = False  # клик или набор снимают выделение
+        if code == PAUSE:
+            if value == 1 and not (self.held & OTHER_MODS):
+                self.pending = "selection" if shift else "word"
+        elif code in MOUSE_BUTTONS or self.held & OTHER_MODS:
+            self.reset()
+        elif code == BACKSPACE:
+            if self.word:
+                self.word.pop()
+            if self.line:
+                self.line.pop()
+        elif code in CHAR_KEYS or code == SPACE:
+            if code != SPACE and self.word and self.word[-1][0] == SPACE:
+                self.word = []  # началось новое слово
+            # None — переполнено: не записываем до сброса (Enter, клик и т.п.)
+            if self.word is not None:
+                self.word = self.word + [(code, shift)] if len(self.word) < MAX_LINE else None
+            if self.line is not None:
+                self.line = self.line + [(code, shift)] if len(self.line) < MAX_LINE else None
+        else:
+            self.reset()        # Enter, Tab, стрелки, Esc и т.п.
+
+    def maybe_run(self):
+        # выполняем, когда отпущены и Pause, и (для выделения) Shift
+        if PAUSE in self.held or (self.held & SHIFTS):
+            return
+        mode, self.pending = self.pending, None
+        if self.blocked:
+            return
+        try:
+            if mode == "word":
+                self.fix_word()
+            elif mode == "selection":
+                self.fix_selection()
+        except Exception as e:  # сессия не запущена и т.п. — не падаем
+            print(f"layout-fix: {mode}: {e}", flush=True)
+
+    def retype(self, keys):
+        """Стереть набранное, сменить раскладку и набрать те же клавиши заново."""
+        if not keys:
+            return
+        for _ in keys:
+            self.v.tap(BACKSPACE)
+        self.s.next_layout()
+        time.sleep(0.03)
+        for code, shift in keys:
+            self.v.tap(code, shift)
+
+    def fix_word(self):
+        self.retype(self.word)
+
+    def fix_selection(self):
+        if TERMINAL_RE.search(self.focus):
+            # в терминале выделение не редактируется — исправляем всю строку
+            self.retype(self.line)
+            return
+        if not self.sel_valid:
+            return
+        self.sel_valid = False
+        text = self.s.clip_get(primary=True)
+        if not text:
+            return
+        saved = self.s.clip_get()
+        result, target = convert(text)
+        self.s.clip_set(result)
+        self.v.key(CTRL, 1)
+        self.v.tap(KEY_V)
+        self.v.key(CTRL, 0)
+        layouts = self.s.layouts()
+        if target in layouts:
+            self.s.set_layout(layouts.index(target))
+        time.sleep(0.4)  # приложение должно успеть забрать вставку
+        if saved is not None:
+            self.s.clip_set(saved)
+        self.reset()
+
+
+def device_name(path):
+    try:
+        with open(f"/sys/class/input/{os.path.basename(path)}/device/name") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def main():
+    session = Session(os.environ["LAYOUT_FIX_USER"])  # задаётся в layout-fix.service
+    fixer = Fixer(session, VirtualKeyboard())
+    sel = selectors.DefaultSelector()
+    opened = {}
+    last_scan = 0.0
+    helpers = [
+        # смена выделения; первое срабатывание при запуске — старое выделение
+        Helper(sel, lambda: session.spawn("wl-paste", "-p", "--watch", "/bin/echo", "x"),
+               fixer.on_selection_changed, skip_first_sec=1.0),
+        # активное окно от скрипта KWin
+        Helper(sel, lambda: session.spawn("/usr/bin/python3", "-I", "-c", FOCUS_HELPER,
+                                          FOCUS_JS),
+               fixer.on_session_line, on_exit=fixer.on_session_lost),
+    ]
+    while True:
+        for h in helpers:
+            h.tick()
+        if time.monotonic() - last_scan > 3:  # подхват переподключённых устройств
+            for path in glob.glob("/dev/input/event*"):
+                if path in opened or device_name(path) == VDEV_NAME:
+                    continue
+                try:
+                    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                except OSError:
+                    continue
+                opened[path] = fd
+                sel.register(fd, selectors.EVENT_READ, path)
+            last_scan = time.monotonic()
+        for key, _ in sel.select(timeout=3):
+            if isinstance(key.data, Helper):
+                key.data.readable()
+                continue
+            try:
+                data = os.read(key.fd, EVENT.size * 64)
+            except BlockingIOError:
+                continue
+            except OSError:  # устройство отключилось
+                sel.unregister(key.fd)
+                os.close(key.fd)
+                del opened[key.data]
+                fixer.reset()
+                continue
+            for i in range(0, len(data) - EVENT.size + 1, EVENT.size):
+                _, _, etype, code, value = EVENT.unpack_from(data, i)
+                if etype == EV_KEY:
+                    fixer.on_key(code, value)
+
+
+if __name__ == "__main__":
+    main()
