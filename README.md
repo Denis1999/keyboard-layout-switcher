@@ -1,46 +1,48 @@
 # layout-fix
 
-Исправление текста, набранного не в той раскладке (английская ↔ русская), для **KDE Plasma 6 на Wayland**. Похоже на Punto Switcher, xneur и Easy Switcher, но только по нажатию клавиши, без автоматического переключения.
+[Русский](README.ru.md) | **English**
 
-| Клавиша | Что делает |
+Fix text typed in the wrong keyboard layout (English ↔ Russian) on **KDE Plasma 6 / Wayland**. Similar to Punto Switcher, xneur or Easy Switcher, but it only acts when you press a key. It never switches layouts on its own.
+
+| Key | What it does |
 |---|---|
-| **Caps Lock** | Исправляет последнее слово: `ghbdtn` → `привет`. Повторное нажатие возвращает как было. Работает везде, включая терминалы. |
-| **Shift+Caps Lock** | Исправляет выделенный текст, каждое слово отдельно: `руддщ ghbdtn` → `hello привет`. В терминалах вместо этого исправляется вся строка, набранная с последнего Enter. |
+| **Caps Lock** | Fixes the last word: `ghbdtn` → `привет`. Press again to undo. Works everywhere, terminals included. |
+| **Shift+Caps Lock** | Fixes the selected text, each word separately: `руддщ ghbdtn` → `hello привет`. In terminals it fixes the whole line typed since the last Enter instead. |
 
-После исправления раскладка переключается на язык результата. Своя функция Caps Lock (заглавные буквы) отключается.
+After the fix, the layout switches to the language of the result. Caps Lock no longer works as Caps Lock.
 
-## Установка
+## Installation
 
-Запускать от обычного пользователя внутри сеанса Plasma на Wayland:
+Run as a regular user inside a Plasma Wayland session:
 
 ```bash
 git clone https://github.com/Denis1999/layout-fix.git
 bash layout-fix/install.sh
 ```
 
-Пароль спросят один раз. Если установлен Easy Switcher, установщик его удалит. Нужные пакеты (`wl-clipboard`, `qdbus-qt6`, `python3-dbus`) установщик поставит сам.
+You will be asked for your password once. If Easy Switcher is installed, the installer removes it. The required packages (`wl-clipboard`, `qdbus-qt6`, `python3-dbus`) are installed automatically.
 
-Удаление: `bash layout-fix/uninstall.sh`. Обычный Caps Lock вернётся после перезагрузки или переподключения клавиатуры.
+Uninstall: `bash layout-fix/uninstall.sh`. Normal Caps Lock comes back after a reboot or after reconnecting the keyboard.
 
-## Как устроено
+## How it works
 
-- `90-capslock-pause.hwdb` — правило udev hwdb: Caps Lock становится клавишей Pause на всех USB-клавиатурах. Переназначение делается на уровне ядра и не зависит от настроек KDE.
-- `layout-fix-daemon` и `layout-fix.service` — системная служба на Python. Читает клавиатуры через `/dev/input` и запоминает коды клавиш последнего слова и текущей строки. По Pause стирает набранное, переключает раскладку через D-Bus KDE и набирает те же клавиши заново через свою виртуальную клавиатуру (uinput). С сеансом пользователя (раскладка, буфер обмена) работает от его имени, без прав root.
-- `focus.js` — скрипт KWin. Сообщает службе активное окно (чтобы узнавать терминалы и окна для паролей) и перехватывает Pause, чтобы она не попадала в программы.
+- `90-capslock-pause.hwdb`: a udev hwdb rule that turns Caps Lock into Pause on all USB keyboards. The remap happens in the kernel, so KDE keyboard settings don't affect it.
+- `layout-fix-daemon` and `layout-fix.service`: a system service written in Python. It reads keyboards from `/dev/input` and remembers the key codes of the last word and the current line. On Pause it erases what you typed, switches the layout over KDE's D-Bus and types the same keys again through its own virtual keyboard (uinput). It talks to your session (layout, clipboard) as your user, without root.
+- `focus.js`: a KWin script. It tells the service which window is active, so it can recognise terminals and password windows. It also grabs Pause so the key never reaches applications.
 
-## Безопасность
+## Security
 
-Служба видит все нажатия клавиш, как и любой подобный переключатель. Поэтому:
+Like any tool of this kind, the service sees every key you press. That is why:
 
-- Служба работает от root, и её файлы принадлежат root. Обычные программы не могут ни читать клавиатуру, ни подделывать нажатия.
-- Сеть службе отключена (`PrivateNetwork=yes`), система и домашние папки для неё только для чтения.
-- В памяти хранятся только последнее слово и текущая строка (не больше 100 нажатий). Они стираются по Enter, Tab, стрелкам, сочетаниям с Ctrl/Alt/Super, кликам мыши и при смене окна. На диск ничего не пишется.
-- Нажатия вообще не запоминаются в окнах для паролей (polkit, pinentry, KWallet, KeePassXC, Bitwarden и т. п.), в окнах с заголовком вроде «пароль», «вход» или «login», на экране блокировки и до входа в сеанс.
+- The service runs as root and its files are owned by root. Regular programs can neither read the keyboard nor fake key presses.
+- The service has no network access (`PrivateNetwork=yes`), and the system and home directories are read-only for it.
+- Only the last word and the current line are kept in memory, 100 key presses at most. They are cleared on Enter, Tab, arrow keys, Ctrl/Alt/Super shortcuts, mouse clicks and window changes. Nothing is written to disk.
+- No key presses are remembered at all in password windows (polkit, pinentry, KWallet, KeePassXC, Bitwarden and similar), in windows with titles like "password", "login" or "sign in", on the lock screen, or before you log in.
 
-Не распознаются поле пароля на странице с обычным заголовком и запрос `sudo` в терминале. На Wayland это возможно только через специальные возможности (AT-SPI), а это открыло бы текст всех программ любому процессу.
+Two cases are not recognised: a password field on a page with an ordinary title, and a `sudo` prompt in a terminal. On Wayland detecting them would require accessibility (AT-SPI), which would expose the text of every application to any process.
 
-## Ограничения
+## Limitations
 
-- Shift+Caps Lock вставляет результат через Ctrl+V. В терминалах вместо этого исправляется строка.
-- Если в строке двигался курсор или менялась раскладка, буфер сбрасывается. Это сделано намеренно: служба не знает, где курсор.
-- Поддерживаются раскладки `us` и `ru`.
+- Shift+Caps Lock pastes the result with Ctrl+V. In terminals the line is fixed instead.
+- If you moved the cursor or switched the layout within the line, the buffer is reset. This is deliberate: the service doesn't know where the cursor is.
+- Only the `us` and `ru` layouts are supported.
