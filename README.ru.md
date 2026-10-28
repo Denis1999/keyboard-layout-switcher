@@ -13,21 +13,29 @@
 
 ## Установка
 
-Запускать от обычного пользователя внутри сеанса Plasma на Wayland:
+Скачай `.deb` со страницы [Releases](https://github.com/Denis1999/keyboard-layout-switcher/releases/latest) и установи:
+
+```bash
+sudo apt install ./keyboard-layout-switcher_*_all.deb
+```
+
+Зависимости (`wl-clipboard`, `qdbus-qt6`, `python3-dbus`, `python3-gi`) apt поставит сам. Если установлен Easy Switcher, он будет удалён или выключен. Настраивать ничего не нужно: служба работает для того, кто вошёл в активный сеанс Plasma на Wayland.
+
+Удаление: `sudo apt remove keyboard-layout-switcher`. Обычный Caps Lock вернётся после перезагрузки или переподключения клавиатуры.
+
+### Из исходников
 
 ```bash
 git clone https://github.com/Denis1999/keyboard-layout-switcher.git
-bash keyboard-layout-switcher/install.sh
+bash keyboard-layout-switcher/install.sh     # соберёт .deb и установит его
 ```
 
-Пароль спросят один раз. Если установлен Easy Switcher, установщик его удалит. Нужные пакеты (`wl-clipboard`, `qdbus-qt6`, `python3-dbus`) установщик поставит сам.
-
-Удаление: `bash keyboard-layout-switcher/uninstall.sh`. Обычный Caps Lock вернётся после перезагрузки или переподключения клавиатуры.
+`bash build-deb.sh` только собирает пакет в `dist/`, для этого нужен лишь `dpkg-deb`.
 
 ## Как устроено
 
 - `90-capslock-pause.hwdb` — правило udev hwdb: Caps Lock становится клавишей Pause на всех USB-клавиатурах. Переназначение делается на уровне ядра и не зависит от настроек KDE.
-- `layout-fix-daemon` и `layout-fix.service` — системная служба на Python. Читает клавиатуры через `/dev/input` и запоминает коды клавиш последнего слова и текущей строки. По Pause стирает набранное, переключает раскладку через D-Bus KDE и набирает те же клавиши заново через свою виртуальную клавиатуру (uinput). С сеансом пользователя (раскладка, буфер обмена) работает от его имени, без прав root.
+- `layout-fix-daemon` и `layout-fix.service` — системная служба на Python. Активный графический сеанс она находит через logind. Читает клавиатуры через `/dev/input` и запоминает коды клавиш последнего слова и текущей строки. По Pause стирает набранное, переключает раскладку через D-Bus KDE и набирает те же клавиши заново через свою виртуальную клавиатуру (uinput). С сеансом пользователя (раскладка, буфер обмена) работает от его имени, без прав root.
 - `focus.js` — скрипт KWin. Сообщает службе активное окно (чтобы узнавать терминалы и окна для паролей) и перехватывает Pause, чтобы она не попадала в программы.
 
 ## Безопасность

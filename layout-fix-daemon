@@ -24,8 +24,10 @@ import os
 import pwd
 import re
 import selectors
+import signal
 import struct
 import subprocess
+import sys
 import time
 
 # --- evdev / uinput ---------------------------------------------------------
@@ -45,7 +47,7 @@ MOUSE_BUTTONS = set(range(0x110, 0x118))
 MAX_LINE = 100  # больше нажатий в слове/строке не храним
 
 # --- активное окно (через скрипт KWin) ---------------------------------------
-FOCUS_JS = "/usr/local/share/layout-fix/focus.js"
+FOCUS_JS = "/usr/share/layout-fix/focus.js"
 # В терминалах выделение — текст на экране, заменить его нельзя
 TERMINAL_RE = re.compile(r"konsole|yakuake|terminal|kitty|alacritty|foot|wezterm|"
                          r"xterm|tilix|terminator|ghostty|rio|warp", re.I)
@@ -115,13 +117,50 @@ def convert(text):
 
 
 # --- действия в сессии пользователя -----------------------------------------
+def read_kv(path):
+    try:
+        with open(path) as f:
+            return dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
+    except OSError:
+        return {}
+
+
+def active_wayland_uid():
+    """uid пользователя активного графического сеанса на seat0 (по данным logind)
+    или None: экран входа, текстовая консоль, никто не вошёл."""
+    seat = read_kv("/run/systemd/seats/seat0")
+    sess = read_kv(f"/run/systemd/sessions/{seat.get('ACTIVE', '')}") if seat.get("ACTIVE") else {}
+    if sess.get("TYPE") == "wayland" and sess.get("CLASS") == "user" and sess.get("UID", "").isdigit():
+        return int(sess["UID"])
+    return None
+
+
 class Session:
-    def __init__(self, user):
-        pw = pwd.getpwnam(user)
-        self.uid, self.gid, self.home = pw.pw_uid, pw.pw_gid, pw.pw_dir
-        self.runtime = f"/run/user/{self.uid}"
+    """Сеанс пользователя, от имени которого служба работает с KDE.
+    Пользователь — из LAYOUT_FIX_USER, а если не задан — активный сеанс Wayland."""
+
+    def __init__(self, fixed_user=None):
+        self.fixed_uid = pwd.getpwnam(fixed_user).pw_uid if fixed_user else None
+        self.uid = None
+
+    def refresh(self):
+        """Обновить пользователя. True, если он сменился."""
+        uid = self.fixed_uid if self.fixed_uid is not None else active_wayland_uid()
+        if uid == self.uid:
+            return False
+        self.uid = uid
+        if uid is not None:
+            pw = pwd.getpwuid(uid)
+            self.gid, self.home = pw.pw_gid, pw.pw_dir
+            self.runtime = f"/run/user/{uid}"
+            print(f"layout-fix: сеанс пользователя {pw.pw_name}", flush=True)
+        else:
+            print("layout-fix: нет активного графического сеанса", flush=True)
+        return True
 
     def env(self):
+        if self.uid is None:
+            return {}
         env = {"HOME": self.home, "XDG_RUNTIME_DIR": self.runtime,
                "DBUS_SESSION_BUS_ADDRESS": f"unix:path={self.runtime}/bus",
                "PATH": "/usr/bin:/bin"}
@@ -132,6 +171,8 @@ class Session:
         return env
 
     def run(self, *cmd, inp=None, wait_output=True):
+        if self.uid is None:
+            raise RuntimeError("нет активного сеанса")
         kw = dict(user=self.uid, group=self.gid, extra_groups=[], env=self.env(),
                   input=inp, text=True, timeout=3)
         if wait_output:
@@ -192,12 +233,29 @@ class Helper:
             self.started = time.monotonic()
             try:
                 self.proc = self.start()
-            except OSError:
+            except OSError as e:
+                print(f"layout-fix: не удалось запустить процесс сеанса: {e}", flush=True)
                 self.proc = None
             if self.proc is not None:
                 self.buf = b""
                 os.set_blocking(self.proc.stdout.fileno(), False)
                 self.sel.register(self.proc.stdout, selectors.EVENT_READ, self)
+
+    def stop(self):
+        """Остановить процесс (например, сменился пользователь)."""
+        if self.proc is not None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+            self.sel.unregister(self.proc.stdout)
+            self.proc.stdout.close()
+            self.proc = None
+            if self.on_exit:
+                self.on_exit()
+        self.started = -10.0  # следующий tick() запустит заново сразу
 
     def readable(self):
         try:
@@ -390,11 +448,12 @@ def device_name(path):
 
 
 def main():
-    session = Session(os.environ["LAYOUT_FIX_USER"])  # задаётся в layout-fix.service
+    # LAYOUT_FIX_USER — необязательно, по умолчанию пользователь активного сеанса
+    session = Session(os.environ.get("LAYOUT_FIX_USER") or None)
+    session.refresh()
     fixer = Fixer(session, VirtualKeyboard())
     sel = selectors.DefaultSelector()
     opened = {}
-    last_scan = 0.0
     helpers = [
         # смена выделения; первое срабатывание при запуске — старое выделение
         Helper(sel, lambda: session.spawn("wl-paste", "-p", "--watch", "/bin/echo", "x"),
@@ -404,7 +463,29 @@ def main():
                                           FOCUS_JS),
                fixer.on_session_line, on_exit=fixer.on_session_lost),
     ]
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        loop(session, fixer, sel, opened, helpers)
+    finally:
+        # остановка службы (apt remove, systemctl stop): выгрузить скрипт KWin,
+        # чтобы Pause не перехватывалась без службы. При запуске он загрузится снова.
+        for h in helpers:
+            h.stop()
+        try:
+            session.run("qdbus6", "org.kde.KWin", "/Scripting",
+                        "org.kde.kwin.Scripting.unloadScript", "layout-fix")
+        except Exception:
+            pass
+
+
+def loop(session, fixer, sel, opened, helpers):
+    last_scan = 0.0
     while True:
+        if time.monotonic() - last_scan > 3 and session.refresh():
+            # сменился пользователь (вход, выход, переключение) — процессы сеанса заново
+            for h in helpers:
+                h.stop()
+            fixer.on_session_lost()
         for h in helpers:
             h.tick()
         if time.monotonic() - last_scan > 3:  # подхват переподключённых устройств

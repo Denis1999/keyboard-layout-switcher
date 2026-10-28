@@ -4,8 +4,7 @@ After=systemd-udevd.service
 
 [Service]
 Type=simple
-Environment=LAYOUT_FIX_USER=@USER@
-ExecStart=/usr/bin/python3 -I /usr/local/sbin/layout-fix-daemon
+ExecStart=/usr/bin/python3 -I /usr/sbin/layout-fix-daemon
 Restart=always
 RestartSec=2
 # Ограничения: без сети, система и домашние папки только для чтения

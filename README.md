@@ -13,21 +13,29 @@ After the fix, the layout switches to the language of the result. Caps Lock no l
 
 ## Installation
 
-Run as a regular user inside a Plasma Wayland session:
+Download the `.deb` from [Releases](https://github.com/Denis1999/keyboard-layout-switcher/releases/latest) and install it:
+
+```bash
+sudo apt install ./keyboard-layout-switcher_*_all.deb
+```
+
+apt installs the dependencies (`wl-clipboard`, `qdbus-qt6`, `python3-dbus`, `python3-gi`). If Easy Switcher is installed, it is removed or disabled. No configuration is needed: the service works for whoever is logged into the active Plasma Wayland session.
+
+Uninstall: `sudo apt remove keyboard-layout-switcher`. Normal Caps Lock comes back after a reboot or after reconnecting the keyboard.
+
+### From source
 
 ```bash
 git clone https://github.com/Denis1999/keyboard-layout-switcher.git
-bash keyboard-layout-switcher/install.sh
+bash keyboard-layout-switcher/install.sh     # builds the .deb and installs it
 ```
 
-You will be asked for your password once. If Easy Switcher is installed, the installer removes it. The required packages (`wl-clipboard`, `qdbus-qt6`, `python3-dbus`) are installed automatically.
-
-Uninstall: `bash keyboard-layout-switcher/uninstall.sh`. Normal Caps Lock comes back after a reboot or after reconnecting the keyboard.
+`bash build-deb.sh` only builds the package into `dist/`; it needs nothing but `dpkg-deb`.
 
 ## How it works
 
 - `90-capslock-pause.hwdb`: a udev hwdb rule that turns Caps Lock into Pause on all USB keyboards. The remap happens in the kernel, so KDE keyboard settings don't affect it.
-- `layout-fix-daemon` and `layout-fix.service`: a system service written in Python. It reads keyboards from `/dev/input` and remembers the key codes of the last word and the current line. On Pause it erases what you typed, switches the layout over KDE's D-Bus and types the same keys again through its own virtual keyboard (uinput). It talks to your session (layout, clipboard) as your user, without root.
+- `layout-fix-daemon` and `layout-fix.service`: a system service written in Python. It finds the active graphical session through logind. It reads keyboards from `/dev/input` and remembers the key codes of the last word and the current line. On Pause it erases what you typed, switches the layout over KDE's D-Bus and types the same keys again through its own virtual keyboard (uinput). It talks to your session (layout, clipboard) as your user, without root.
 - `focus.js`: a KWin script. It tells the service which window is active, so it can recognise terminals and password windows. It also grabs Pause so the key never reaches applications.
 
 ## Security

@@ -1,0 +1,20 @@
+Package: keyboard-layout-switcher
+Version: @VERSION@
+Architecture: all
+Section: utils
+Priority: optional
+Maintainer: Denis1999 <6135990+Denis1999@users.noreply.github.com>
+Homepage: https://github.com/Denis1999/keyboard-layout-switcher
+Depends: python3, python3-dbus, python3-gi, wl-clipboard, qdbus-qt6, systemd, udev
+Recommends: plasma-workspace, kwin-wayland
+Conflicts: easy-switcher
+Replaces: easy-switcher
+Description: fix text typed in the wrong keyboard layout (en/ru) on KDE Plasma Wayland
+ Caps Lock fixes the last typed word (erase, switch layout, retype the same
+ keys); pressing it again undoes. Shift+Caps Lock fixes the selected text word
+ by word, or the whole current line in terminals.
+ .
+ A sandboxed system service reads the keyboards directly and injects keys
+ through its own virtual keyboard. It keeps only the last word and line in
+ memory, never writes them anywhere, and ignores password windows and the
+ lock screen. Caps Lock is remapped to Pause via udev hwdb.

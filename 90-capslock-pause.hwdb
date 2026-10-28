@@ -1,3 +1,3 @@
-# Caps Lock -> Pause на всех USB-клавиатурах (для ~/.local/bin/layout-fix)
+# Caps Lock -> Pause на всех USB-клавиатурах (keyboard-layout-switcher / layout-fix)
 evdev:input:b0003*
  KEYBOARD_KEY_70039=pause

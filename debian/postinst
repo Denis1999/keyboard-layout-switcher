@@ -1,0 +1,34 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    # Старая ручная установка layout-fix (/usr/local, /etc): убираем, чтобы не было двух копий
+    if [ -f /etc/systemd/system/layout-fix.service ] && \
+       grep -q "/usr/local/sbin/layout-fix-daemon" /etc/systemd/system/layout-fix.service; then
+        systemctl disable --now layout-fix.service >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/layout-fix.service
+    fi
+    if [ -f /usr/local/sbin/layout-fix-daemon ] && grep -q "layout-fix" /usr/local/sbin/layout-fix-daemon; then
+        rm -f /usr/local/sbin/layout-fix-daemon
+    fi
+    rm -rf /usr/local/share/layout-fix
+    if [ -f /etc/udev/hwdb.d/90-capslock-pause.hwdb ] && grep -q "layout-fix" /etc/udev/hwdb.d/90-capslock-pause.hwdb; then
+        rm -f /etc/udev/hwdb.d/90-capslock-pause.hwdb
+    fi
+
+    # Easy Switcher, установленный не из пакета (из пакета его уберёт apt: Conflicts)
+    if [ -f /lib/systemd/system/easy-switcher.service ] || [ -f /etc/systemd/system/easy-switcher.service ]; then
+        systemctl disable --now easy-switcher.service >/dev/null 2>&1 || true
+        echo "keyboard-layout-switcher: служба Easy Switcher выключена"
+    fi
+
+    # Caps Lock -> Pause
+    systemd-hwdb update || true
+    udevadm trigger --subsystem-match=input --action=change || true
+
+    systemctl daemon-reload
+    systemctl enable layout-fix.service >/dev/null
+    systemctl restart layout-fix.service
+fi
+
+exit 0

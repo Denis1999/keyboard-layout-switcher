@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    systemctl daemon-reload || true
+    systemd-hwdb update || true
+    udevadm trigger --subsystem-match=input --action=change || true
+    echo "keyboard-layout-switcher: обычный Caps Lock вернётся после перезагрузки или переподключения клавиатуры"
+fi
+
+exit 0
