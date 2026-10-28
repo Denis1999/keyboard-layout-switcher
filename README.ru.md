@@ -1,4 +1,4 @@
-# layout-fix
+# Keyboard Layout Switcher
 
 **Русский** | [English](README.md)
 
@@ -16,13 +16,13 @@
 Запускать от обычного пользователя внутри сеанса Plasma на Wayland:
 
 ```bash
-git clone https://github.com/Denis1999/layout-fix.git
-bash layout-fix/install.sh
+git clone https://github.com/Denis1999/keyboard-layout-switcher.git
+bash keyboard-layout-switcher/install.sh
 ```
 
 Пароль спросят один раз. Если установлен Easy Switcher, установщик его удалит. Нужные пакеты (`wl-clipboard`, `qdbus-qt6`, `python3-dbus`) установщик поставит сам.
 
-Удаление: `bash layout-fix/uninstall.sh`. Обычный Caps Lock вернётся после перезагрузки или переподключения клавиатуры.
+Удаление: `bash keyboard-layout-switcher/uninstall.sh`. Обычный Caps Lock вернётся после перезагрузки или переподключения клавиатуры.
 
 ## Как устроено
 

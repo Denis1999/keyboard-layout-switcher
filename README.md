@@ -1,4 +1,4 @@
-# layout-fix
+# Keyboard Layout Switcher
 
 [Русский](README.ru.md) | **English**
 
@@ -16,13 +16,13 @@ After the fix, the layout switches to the language of the result. Caps Lock no l
 Run as a regular user inside a Plasma Wayland session:
 
 ```bash
-git clone https://github.com/Denis1999/layout-fix.git
-bash layout-fix/install.sh
+git clone https://github.com/Denis1999/keyboard-layout-switcher.git
+bash keyboard-layout-switcher/install.sh
 ```
 
 You will be asked for your password once. If Easy Switcher is installed, the installer removes it. The required packages (`wl-clipboard`, `qdbus-qt6`, `python3-dbus`) are installed automatically.
 
-Uninstall: `bash layout-fix/uninstall.sh`. Normal Caps Lock comes back after a reboot or after reconnecting the keyboard.
+Uninstall: `bash keyboard-layout-switcher/uninstall.sh`. Normal Caps Lock comes back after a reboot or after reconnecting the keyboard.
 
 ## How it works
 
