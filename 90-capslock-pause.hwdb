@@ -1,3 +1,12 @@
-# Caps Lock -> Pause на всех USB-клавиатурах (keyboard-layout-switcher / layout-fix)
+# Caps Lock -> Pause (keyboard-layout-switcher / layout-fix)
+# USB-клавиатуры
 evdev:input:b0003*
  KEYBOARD_KEY_70039=pause
+
+# Bluetooth-клавиатуры
+evdev:input:b0005*
+ KEYBOARD_KEY_70039=pause
+
+# встроенные клавиатуры ноутбуков (AT/PS/2)
+evdev:atkbd:*
+ KEYBOARD_KEY_3a=pause
