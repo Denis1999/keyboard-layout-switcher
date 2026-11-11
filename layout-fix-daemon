@@ -5,11 +5,12 @@
 нажатия выдаёт через собственную виртуальную клавиатуру (uinput).
 С сессией KDE (раскладка, буфер обмена) работает от имени LAYOUT_FIX_USER.
 
-  Pause (Caps Lock)        — последнее слово: стереть, сменить раскладку,
+  Pause (Caps Lock)        — есть свежее выделение: перевести его и вставить.
+                             Нет (или терминал, где выделение не редактируется) —
+                             последнее слово: стереть, сменить раскладку,
                              набрать те же клавиши заново. Повтор — вернуть.
-  Shift+Pause (Shift+Caps) — выделенный текст: перевести и вставить.
-                             В терминалах (выделение там не редактируется) —
-                             вся строка с последнего Enter, тем же способом, что слово.
+  Shift+Pause (Shift+Caps) — всё набранное с последнего Enter, стрелки, Delete
+                             или Backspace, тем же способом, что слово. Повтор — вернуть.
 
 Pause/Shift+Pause забирает у программ скрипт KWin (focus.js); он же сообщает
 класс активного окна.
@@ -301,13 +302,14 @@ class Fixer:
     def __init__(self, session, vkbd):
         self.s, self.v = session, vkbd
         self.word = []      # [(keycode, shift)] последнего слова + пробелы после него
-        self.line = []      # то же для всей строки с последнего Enter (для терминалов)
+        self.line = []      # то же для набранного с последнего Enter/стрелки/Del/Backspace
         self.held = set()
-        self.pending = None  # "word" | "selection"
+        self.pending = None  # "word" | "line"
         # Выделение на Wayland не очищается при снятии, поэтому считаем его
         # действительным, только если оно сменилось после последнего
-        # набора текста или клика мышью.
+        # набора текста, клика мышью или смены окна.
         self.sel_valid = False
+        self.sel_ignore_until = 0.0  # смена выделения от нашей же вставки
         self.focus = ""      # класс активного окна
         self.window = None   # id активного окна
         self.sensitive = False
@@ -319,7 +321,8 @@ class Fixer:
         return self.sensitive or self.locked or not self.session_known
 
     def on_selection_changed(self, _line=""):
-        self.sel_valid = True
+        if time.monotonic() >= self.sel_ignore_until:
+            self.sel_valid = True
 
     def on_session_line(self, line):
         kind, _, rest = line.partition("\t")
@@ -327,6 +330,7 @@ class Fixer:
             wid, cls, caption = (rest.split("\t") + ["", ""])[:3]
             if wid != self.window:
                 self.reset()  # в другом окне набранное раньше не исправляем
+                self.sel_valid = False
             self.window, self.focus = wid, cls
             self.sensitive = bool(SENSITIVE_CLASS_RE.search(cls)
                                   or SENSITIVE_TITLE_RE.search(caption))
@@ -347,7 +351,7 @@ class Fixer:
     def on_key(self, code, value):
         if value == 0:
             self.held.discard(code)
-            if code == PAUSE or (code in SHIFTS and self.pending == "selection"):
+            if code == PAUSE or (code in SHIFTS and self.pending == "line"):
                 self.maybe_run()
             return
         if value == 1:
@@ -365,14 +369,13 @@ class Fixer:
             self.sel_valid = False  # клик или набор снимают выделение
         if code == PAUSE:
             if value == 1 and not (self.held & OTHER_MODS):
-                self.pending = "selection" if shift else "word"
+                self.pending = "line" if shift else "word"
         elif code in MOUSE_BUTTONS or self.held & OTHER_MODS:
             self.reset()
         elif code == BACKSPACE:
             if self.word:
                 self.word.pop()
-            if self.line:
-                self.line.pop()
+            self.line = []  # строка для Shift+Pause начинается после правки
         elif code in CHAR_KEYS or code == SPACE:
             if code != SPACE and self.word and self.word[-1][0] == SPACE:
                 self.word = []  # началось новое слово
@@ -385,7 +388,7 @@ class Fixer:
             self.reset()        # Enter, Tab, стрелки, Esc и т.п.
 
     def maybe_run(self):
-        # выполняем, когда отпущены и Pause, и (для выделения) Shift
+        # выполняем, когда отпущены и Pause, и (для строки) Shift
         if PAUSE in self.held or (self.held & SHIFTS):
             return
         mode, self.pending = self.pending, None
@@ -393,9 +396,10 @@ class Fixer:
             return
         try:
             if mode == "word":
-                self.fix_word()
-            elif mode == "selection":
-                self.fix_selection()
+                if not self.fix_selection():
+                    self.retype(self.word)
+            elif mode == "line":
+                self.retype(self.line)
         except Exception as e:  # сессия не запущена и т.п. — не падаем
             print(f"layout-fix: {mode}: {e}", flush=True)
 
@@ -410,20 +414,15 @@ class Fixer:
         for code, shift in keys:
             self.v.tap(code, shift)
 
-    def fix_word(self):
-        self.retype(self.word)
-
     def fix_selection(self):
-        if TERMINAL_RE.search(self.focus):
-            # в терминале выделение не редактируется — исправляем всю строку
-            self.retype(self.line)
-            return
-        if not self.sel_valid:
-            return
+        """Перевести свежее выделение и вставить вместо него.
+        False, если выделения нет — тогда исправляется последнее слово."""
+        if not self.sel_valid or TERMINAL_RE.search(self.focus):
+            return False  # в терминале выделение не редактируется
         self.sel_valid = False
         text = self.s.clip_get(primary=True)
         if not text:
-            return
+            return False
         saved = self.s.clip_get()
         result, target = convert(text)
         self.s.clip_set(result)
@@ -437,6 +436,10 @@ class Fixer:
         if saved is not None:
             self.s.clip_set(saved)
         self.reset()
+        # вставка может сменить выделение, это не новое выделение пользователя
+        self.sel_ignore_until = time.monotonic() + 1.0
+        self.sel_valid = False
+        return True
 
 
 def device_name(path):

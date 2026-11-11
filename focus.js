@@ -29,4 +29,4 @@ workspace.windowActivated.connect(activated);
 activated(workspace.activeWindow);
 
 registerShortcut("layout-fix-word", "layout-fix: исправить последнее слово", "Pause", function () {});
-registerShortcut("layout-fix-selection", "layout-fix: исправить выделенное", "Shift+Pause", function () {});
+registerShortcut("layout-fix-selection", "layout-fix: исправить строку", "Shift+Pause", function () {});

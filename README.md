@@ -6,8 +6,8 @@ Fix text typed in the wrong keyboard layout (English ↔ Russian) on **KDE Plasm
 
 | Key | What it does |
 |---|---|
-| **Caps Lock** | Fixes the last word: `ghbdtn` → `привет`. Press again to undo. Works everywhere, terminals included. |
-| **Shift+Caps Lock** | Fixes the selected text, each word separately: `руддщ ghbdtn` → `hello привет`. In terminals it fixes the whole line typed since the last Enter instead. |
+| **Caps Lock** | Fixes the last word: `ghbdtn` → `привет`. Press again to undo. Works everywhere, terminals included. If you have just selected some text, fixes the selection instead, each word separately: `руддщ ghbdtn` → `hello привет`. |
+| **Shift+Caps Lock** | Fixes everything typed since the last Enter, arrow key, Delete or Backspace: `ghbdtn vbh` → `привет мир`. Press again to undo. |
 
 After the fix, the layout switches to the language of the result. Caps Lock no longer works as Caps Lock.
 
@@ -51,6 +51,6 @@ Two cases are not recognised: a password field on a page with an ordinary title,
 
 ## Limitations
 
-- Shift+Caps Lock pastes the result with Ctrl+V. In terminals the line is fixed instead.
+- A fixed selection is pasted with Ctrl+V. In terminals the selection can't be edited, so Caps Lock fixes the last word there.
 - If you moved the cursor or switched the layout within the line, the buffer is reset. This is deliberate: the service doesn't know where the cursor is.
 - Only the `us` and `ru` layouts are supported.

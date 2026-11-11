@@ -25,5 +25,5 @@ rm -rf "$TMP"
 
 sleep 2
 systemctl is-active layout-fix.service >/dev/null \
-    && echo "Готово: Caps Lock — слово, Shift+Caps Lock — выделенное (в терминале — строка)." \
+    && echo "Готово: Caps Lock — слово или выделенное, Shift+Caps Lock — строка." \
     || { echo "Служба не запустилась, смотри: journalctl -u layout-fix"; exit 1; }

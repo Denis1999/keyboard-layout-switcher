@@ -11,8 +11,9 @@ Conflicts: easy-switcher
 Replaces: easy-switcher
 Description: fix text typed in the wrong keyboard layout (en/ru) on KDE Plasma Wayland
  Caps Lock fixes the last typed word (erase, switch layout, retype the same
- keys); pressing it again undoes. Shift+Caps Lock fixes the selected text word
- by word, or the whole current line in terminals.
+ keys) or, if text was just selected, the selection word by word; pressing it
+ again undoes. Shift+Caps Lock fixes everything typed since the last Enter, arrow key,
+ Delete or Backspace.
  .
  A sandboxed system service reads the keyboards directly and injects keys
  through its own virtual keyboard. It keeps only the last word and line in

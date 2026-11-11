@@ -1,5 +1,5 @@
 [Unit]
-Description=layout-fix: исправление раскладки последнего слова / выделения
+Description=layout-fix: исправление раскладки слова, строки или выделения
 After=systemd-udevd.service
 
 [Service]
