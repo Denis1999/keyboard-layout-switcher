@@ -1,36 +1,64 @@
 #!/bin/bash
 # Коммит, push и публикация релиза с .deb на GitHub.
-#   bash publish-release.sh
+#   bash publish-release.sh -n NOTES.md [-m "сообщение коммита" | -F COMMIT_MSG_FILE]
+#
+#   -n  файл со списком изменений (Markdown); раздел про установку
+#       добавляется к нему сам
+#   -m  сообщение коммита строкой, -F — из файла; нужно, только если есть
+#       незакоммиченные изменения
+# Версия берётся из VERSION, тег — v<версия>.
 set -e
 cd "$(dirname "$0")"
+REPO=Denis1999/keyboard-layout-switcher
+
+usage() { sed -n '3,8s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+NOTES= MSG= MSG_FILE=
+while getopts "n:m:F:h" opt; do
+    case $opt in
+        n) NOTES="$(realpath "$OPTARG")" ;;
+        m) MSG="$OPTARG" ;;
+        F) MSG_FILE="$(realpath "$OPTARG")" ;;
+        *) usage ;;
+    esac
+done
+[ -n "$NOTES" ] || usage
+[ -s "$NOTES" ] || { echo "Нет файла с изменениями или он пуст: $NOTES" >&2; exit 1; }
+
 VERSION="$(cat VERSION)"
-DEB="$(bash build-deb.sh)"
+if gh release view "v$VERSION" -R "$REPO" >/dev/null 2>&1; then
+    echo "Релиз v$VERSION уже есть. Подними версию в VERSION." >&2
+    exit 1
+fi
 
 git add -A
 if ! git diff --cached --quiet; then
-    git commit -m "Debian package (.deb), automatic session user detection
-
-- build-deb.sh builds keyboard-layout-switcher_<version>_all.deb with dpkg-deb
-- standard paths: /usr/sbin, /usr/share/layout-fix, /usr/lib/systemd/system,
-  /usr/lib/udev/hwdb.d; postinst migrates the old manual install
-- the service finds the active Wayland session user via logind
-  (no LAYOUT_FIX_USER needed) and follows user switches
-- the KWin script is unloaded when the service stops
-- add missing python3-gi dependency
-- install.sh builds and installs the package; uninstall.sh uses apt
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+    if [ -n "$MSG_FILE" ]; then
+        git commit -F "$MSG_FILE"
+    elif [ -n "$MSG" ]; then
+        git commit -m "$MSG"
+    else
+        git reset -q
+        echo "Есть незакоммиченные изменения: укажи сообщение коммита (-m или -F)." >&2
+        exit 1
+    fi
 fi
+DEB="$(bash build-deb.sh)"
 git push
 
-gh release create "v$VERSION" "$DEB" -R Denis1999/keyboard-layout-switcher \
-    --title "$VERSION" \
-    --notes "Install: download keyboard-layout-switcher_${VERSION}_all.deb and run
+{
+    echo "## Changes"
+    echo
+    cat "$NOTES"
+    echo
+    echo "## Install"
+    echo
+    echo "Download \`$(basename "$DEB")\` and run"
+    echo
+    echo '```'
+    echo "sudo apt install ./$(basename "$DEB")"
+    echo '```'
+    echo
+    echo "Requires KDE Plasma 6 on Wayland with us + ru layouts. See README for details."
+} | gh release create "v$VERSION" "$DEB" -R "$REPO" --title "$VERSION" --notes-file -
 
-\`\`\`
-sudo apt install ./keyboard-layout-switcher_${VERSION}_all.deb
-\`\`\`
-
-Requires KDE Plasma 6 on Wayland with us + ru layouts. See README for details."
-
-gh release view "v$VERSION" -R Denis1999/keyboard-layout-switcher --json url --jq .url
+gh release view "v$VERSION" -R "$REPO" --json url --jq .url
